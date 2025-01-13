@@ -1,0 +1,345 @@
+---
+title: "UC2 Sentinel project: evaluation of missing pattern of body mass index (BMI) in flu and covid cohorts of Kaiser Permanente Washington EHR"
+author: "Noorie Hyun"
+date: "6/19/2024"
+output:
+ html_document:
+        toc: true
+        theme: cerulean
+        highlight: default
+        #code_folding: hide
+editor_options: 
+        chunk_output_type: console
+---
+
+
+  <style type="text/css">
+    h1.title {
+      font-size: 26px;
+      font-family: "Times New Roman", Times, serif;
+      color: DarkBlue;
+    }
+    h1 { /* Header 1 */
+      font-size: 22px;
+      font-family: "Times New Roman", Times, serif;
+      color: DarkBlue;
+    }
+    h2 { /* Header 2 */
+        font-size: 18px;
+        font-family: "Times New Roman", Times, serif;
+      color: DarkBlue;
+    }
+    h3 { /* Header 3 */
+      font-size: 14px;
+      font-family: "Times New Roman", Times, serif;
+      color: DarkBlue;
+    }
+    pre { /* Code block - determines code spacing between lines */
+    font-size: 14px;
+    }
+  </style>
+
+Output was generated with `r version$version.string`.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r  echo=FALSE, message=FALSE, warning=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+options(knitr.duplicate.label = 'allow')
+
+library(smdi)
+library(naniar) #replace NA
+library(haven)
+library(dplyr)
+library(knitr)
+library(tidyverse)
+library(arsenal)#comparedf()
+
+```
+
+
+```{r include=FALSE, message=FALSE, warning=FALSE}
+
+input.dir<-"G:/CTRHS/Sentinel/Innovation_Center/UC2_Shortreed/ANALYSIS/Noorie/Data/"
+input.dir2<-"//Groups.ghc.org/data/CTRHS/Sentinel/Innovation_Center/UC2_Shortreed/PROGRAMMING/DATA/PHI_Interim/Pull COD-Covid-19 cohort/"
+
+## read data 
+
+ate<-read_sas(data_file=paste0(input.dir,"r04_ip_ate_dxip.sas7bdat"))%>%data.frame()%>%arrange(PATID)
+ate2<-read_sas(data_file=paste0(input.dir,"r04_ip_ate.sas7bdat"))%>%data.frame()%>%arrange(PATID)%>%
+  mutate(group=ifelse(exposure==1,"cov_ip_ate_dxip", "flu_ip_ate_dxip"))
+
+covlist<-c("PATID","group",setdiff(names(ate2),names(ate)))
+
+## cod data
+
+flu.cod<-read_sas(data_file=paste0(input.dir,"r04_cod.sas7bdat"))
+nrow(flu.cod) #730
+n_distinct(flu.cod$PATID) #249
+
+covid.cod<-read_sas(data_file=paste0(input.dir2,"cod_r04.sas7bdat"))
+nrow(covid.cod) #574
+n_distinct(covid.cod) #574
+
+# 10 subjects with ATE-related deaths 
+flu.cod.person<-flu.cod%>%filter(COD_ATE==1)%>%
+  group_by(PATID)%>%
+  summarise(DaysDiff_index_to_Dth=min(DaysDiff_index_to_Dth))%>%
+  mutate(DaysDiff_index_to_Dth = DaysDiff_index_to_Dth +1,
+         exposure=0)
+  
+# 11 subjects with ATE-related deaths 
+covid.cod.person<-covid.cod%>%filter(COD_ATE==1)%>%
+    group_by(PATID)%>%
+    summarise(DaysDiff_index_to_Dth=min(DaysDiff_index_to_Dth),
+            deathdt=min(deathdt))%>%
+   mutate(DaysDiff_index_to_Dth = DaysDiff_index_to_Dth +1,
+         exposure=1)
+
+cod<-bind_rows(flu.cod.person,covid.cod.person)
+
+remove(flu.cod.person,covid.cod.person, flu.cod, covid.cod)
+
+###### Merging datasets #############
+# to include variable names without label
+
+race_ethnicity_mapping <- c(
+  "1" = "American Indian or Alaska Native",
+  "2" = "Asian",
+  "3" = "Black or African American",
+  "4" = "Native Hawaiian or Other Pacific Islander",
+  "5" = "White",
+  "0" = "Unknown"
+)
+
+
+ate.ip3<-ate%>%left_join(ate2[,covlist],by=c("PATID","group"))%>%
+  left_join(cod,by=c("PATID","exposure"))%>%
+  mutate( DaysDiff_index_to_Dth=ifelse(is.na(DaysDiff_index_to_Dth),100000,DaysDiff_index_to_Dth),
+    bmi=ifelse(!is.na(Mean_BMI_at_hosp_admit),Mean_BMI_at_hosp_admit,
+                    ifelse(NDays_RecentBMI_to_hosp_admit>=1 & NDays_RecentBMI_to_hosp_admit<=90,
+                        Median_BMI_prior_hosp_admit, NA)),
+         bmi2=ifelse(!is.na(Mean_BMI_at_hosp_admit),Mean_BMI_at_hosp_admit,
+                    ifelse(NDays_RecentBMI_to_hosp_admit>=1 & NDays_RecentBMI_to_hosp_admit<=1826,
+                        Median_BMI_prior_hosp_admit, NA)),
+         group2=ifelse(exposure==1,"COVID","Flu"),
+         hosp_yr=year(IndexDt),
+        comobodity_cat= cut(COMORBIDSCORE,c(0,1,2,50),right=FALSE),
+        raceeth = race_ethnicity_mapping[as.character(RACE)],
+        followuptime=ifelse(fup_event==0 & DaysDiff_index_to_Dth<=91, DaysDiff_index_to_Dth, followuptime),
+        fup_event=ifelse(fup_event==0 & DaysDiff_index_to_Dth<=91, 1, fup_event),
+        fup_time_event=followuptime*fup_event,
+        bmi_observed=ifelse(is.na(bmi),0,1),
+        bmi2_observed=ifelse(is.na(bmi2),0,1))%>%
+  arrange(PATID)
+
+
+# covariates to remove:
+rm_cols <- which(sapply(ate.ip3, function(col)  length(levels(factor(col)))==1)==TRUE)
+ate.ip2<-ate.ip3[,-rm_cols]
+
+
+in.covar<-c("group","Event","Age","sex","HISPANIC","RACE","zip3","COMORBIDSCORE", "NumAV", "NumIP" ,
+            setdiff(names(ate.ip2)[(grep("covar",names(ate.ip2)))],c(paste0("covar",seq(63,85)),"covarstrat","covarnum","covar87","covar23") ),"covar70","covar71","COVAR80","COVAR81","COVAR82","COVAR83","fup_dth","bmi","bmi2")
+
+ate.ip<-ate.ip2[,in.covar]
+
+ate.ip<-ate.ip%>%
+          replace_with_na(replace = list(zip3 = "Missing"))
+
+
+## importing labels from SAS data
+get_labels <- attr_getter("label")
+a<-sapply(ate, get_labels)
+data.labels1=data.frame(label=unlist(a))
+data.labels1$variable=rownames(data.labels1)
+
+
+a2<-sapply(ate2, get_labels)
+data.labels2=data.frame(label=unlist(a2))
+data.labels2$variable=rownames(data.labels2)
+
+data.labels<-data.labels1%>%rename(label1=label)%>%
+    full_join(data.labels2%>%rename(label2=label),by="variable")%>%
+    mutate(label=ifelse(!is.na(label1) & !is.na(label2),label1,
+                        ifelse(is.na(label1) & !is.na(label2),label2,
+                               ifelse(!is.na(label1) & is.na(label2),label1,""))))%>%
+  select(variable,label)
+
+remove(a,a2,data.labels1,data.labels2)
+
+
+
+a<-sapply(ate.ip, get_labels)
+#print(data.frame(label=unlist(a)))
+
+
+```
+
+This  R-markdown result is a part of the Supplementary Material for Pocobelli et al., which is a product of the UC2-sentinel propject. 
+
+# Summarize variables with missing values
+
+* zip3: zip code
+* bmi: median of bmi measured within 90 days prior to hospital admission date
+* bmi2: median of bmi measured within 5 years prior to hospital admission date
+
+```{r include=TRUE, message=FALSE, warning=FALSE}
+
+smdi_summarize(ate.ip)
+
+```
+
+# visualization of missing patterns of BMI
+
+## By group (Covid vs. Flu)
+
+```{r include=TRUE, message=FALSE, warning=FALSE}
+
+smdi_vis(data=ate.ip,covar=c("bmi","bmi2"),strata="group")
+
+```
+
+
+## By the primary outcome of arterial thromboembolism (ATE) event (1: event and 0: no event during 90 days after hospitalization) 
+
+
+```{r include=TRUE, message=FALSE, warning=FALSE}
+
+smdi_vis(data=ate.ip,covar=c("bmi","bmi2"),strata="Event")
+
+```
+
+
+# Group 1 diagnosis
+
+We computes absolute standardized mean differences (ASMDs) of observed patient characteristics.  If ASMDS is close to 0 (say, <0.1), this implies the missing pattern of BMI does not depend on observed covariates, that is, Missing Completely at Random (MCAR) or Missing Not at Random (MNAR). 
+
+
+## Absolute Standardized Mean Differences (ASMD) of BMI
+
+### By the Primary ATE outcome
+
+```{r include=TRUE, message=FALSE, warning=FALSE, fig.height=10}
+
+bmi2.ind<-which(names(ate.ip)=="bmi2")
+out<-smdi_asmd(data=ate.ip[,-bmi2.ind],covar="bmi" , includeNA=FALSE)
+
+out$bmi$asmd_aggregate
+#out$bmi$asmd_table1
+out$bmi$asmd_plot
+
+```
+
+## ASMD of BMI2
+
+```{r include=TRUE, message=FALSE, warning=FALSE,fig.height=10}
+
+bmi.ind<-which(names(ate.ip)=="bmi")
+out2<-smdi_asmd(data=ate.ip[,-bmi.ind],covar="bmi2",  includeNA=FALSE)
+
+out2$bmi$asmd_aggregate
+out2$bmi$asmd_plot
+
+```
+
+## Statisticaltests for the null hypothesis of MCAR of BMI
+
+The null hypothesis for Hotelling’s and LIttle's test that the missing pattern of BMI is MCAR. 
+
+### Two-Sample Hotelling’s T-squared test for missing BMI
+
+```{r include=TRUE, message=FALSE, warning=FALSE}
+smdi_hotelling(data=ate.ip[,-bmi2.ind],covar="bmi")
+```
+
+### Two-Sample Hotelling’s T-squared test for missing BMI2
+
+```{r include=TRUE, message=FALSE, warning=FALSE}
+smdi_hotelling(data=ate.ip[,-bmi.ind],covar="bmi2")
+
+```
+
+## Little Single global chi-square p-value (Little) cross all missing variables WITH the null hypothesis of MCAR 
+
+###  BMI
+
+```{r include=TRUE, message=FALSE, warning=FALSE}
+tout<-smdi_little(data=ate.ip[,-bmi2.ind])
+tout$p.value
+```
+
+###  BMI2
+
+```{r include=TRUE, message=FALSE, warning=FALSE}
+tout2<-smdi_little(data=ate.ip[,-bmi.ind])
+tout2$p.value
+```
+
+# Group 2 diagnosis focusing on MAR
+
+This function trains and fits a random forest classification
+model to predict  the missing indicator of BMI given
+exposure, outcome, and covariates. If the
+resulting area under the receiver operating characteristic
+curve (AUC) is meaningfully >0.5, this would give some evidence for MAR against MCAR as being the underlying missingness mechanism.
+
+## BMI
+```{r include=TRUE, message=TRUE, warning=FALSE}
+output<-smdi_rf(data=ate.ip, covar=c("bmi","bmi2"))
+output$bmi$rf_table
+```
+
+Covariate importance for prediction of BMI missingness 
+
+```{r include=TRUE, message=TRUE, warning=FALSE,fig.height=10}
+output$bmi$rf_plot
+```
+
+
+## BMI2
+```{r include=TRUE, message=TRUE, warning=FALSE}
+output<-smdi_rf(data=ate.ip, covar=c("bmi","bmi2"))
+output$bmi2$rf_table
+```
+
+
+Covariate importance for prediction of BMI2 missingness 
+
+```{r include=TRUE, message=TRUE, warning=FALSE,fig.height=10}
+output$bmi2$rf_plot
+```
+
+# Group 3 diagnosis
+
+This function  examines the association of the missingness indicator of variable "bmi" and the primary ATE outcome. The function computes both a univariate model and a multi-covariate model adjusted for age, sex, race/ethnicity, dropout status, death status, comorbidity score, number of visits, NUMV. and NUMIP. 
+
+As expected, under a MCAR mechanism, there will be no difference in the outcome between patients with and without a value for BMI.
+
+Under MAR, given that missingness can be sufficiently explained by observed covariates, a spurious association in the univariate model will disappear after adjustment. 
+
+If the missingness followed any MNAR mechanism, an association was observed regardless of adjustment.
+
+
+```{r include=TRUE, message=TRUE, warning=FALSE}
+#Important: don't include variables like ID variables, ZIP codes, dates, etc.
+
+in.covar2<-c("Age","sex","HISPANIC","RACE","group","fup_dth","COMORBIDSCORE", "NumAV", "NumIP" ,paste0("covar",c(seq(1,13),seq(28,36),seq(40,47),49,51,52,58,70,71)))
+
+
+smdi_outcome(data=ate.ip,
+                   covar=c(in.covar2,"bmi"),
+                     model=c("logistic"),form_lhs="Event")
+
+smdi_outcome(data=ate.ip,
+                   covar=c(in.covar2,"bmi2"),
+                     model=c("logistic"),form_lhs="Event")
+
+```
+
+
+# Reference
+Janick Weberpals, Sudha R Raman, Pamela A Shaw, Hana Lee, Bradley G Hammill, Sengwee Toh, John G Connolly, Kimberly J Dandreo, Fang Tian, Wei Liu, Jie Li, José J Hernández-Muñoz, Robert J Glynn, Rishi J Desai, smdi: an R package to perform structural missing data investigations on partially observed confounders in real-world evidence studies, JAMIA Open, Volume 7, Issue 1, April 2024, ooae008,
+https://doi.org/10.1093/jamiaopen/ooae008
